@@ -153,7 +153,7 @@ app.post('/api/cf/dns/replace-a', async (req, res) => {
         content: ip,
         ttl: Number.isFinite(ttl) && ttl >= 1 ? ttl : 1,
         proxied,
-        comment: `CrimsonCLS auto (${new Date().toISOString()})`,
+        comment: `CrimsonCF auto (${new Date().toISOString()})`,
       };
       const createUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`;
       const out = await cfFetch(token, createUrl, { method: 'POST', body: JSON.stringify(payload) });

@@ -1,8 +1,8 @@
-# CrimsonCLS
+# CrimsonCF
 
-**CrimsonCLS** is a fast **Cloudflare IP scanner** that tests endpoints using **Layer 4 (TCP handshake)** (not HTTPS), keeps scan history, exports clean newline TXT lists, and generates ready-to-import configs for **Xray-core**, **sing-box**, and **Clash**.
+**CrimsonCF (CrimsonCloudFlare)** is a fast **Cloudflare IP scanner** that tests endpoints using **Layer 4 (TCP handshake)** (not HTTPS), keeps scan history, exports clean newline TXT lists, and generates ready-to-import configs for **Xray-core**, **sing-box**, and **Clash**.
 
-If you searched for: **cloudflare ip scanner**, **cloudflare ip range scanner**, **cloudflare tunnel ip scanner**, **warp ip scanner**, **fastest cloudflare ip**, this project is built for exactly that workflow.
+If you searched for: **cloudflare ip scanner**, **cloudflare ip range scanner**, **cloudflare tunnel ip scanner**, **warp ip scanner**, **fastest cloudflare ip**, this repo is built for that workflow.
 
 ## Features
 
@@ -19,7 +19,7 @@ If you searched for: **cloudflare ip scanner**, **cloudflare ip range scanner**,
 
 ## Quick Start (Docker Compose, recommended)
 
-This runs the UI and probe server on **your own PC** so results match **your network**.
+This runs the UI + probe server in one container.
 
 ```bash
 docker compose up -d
@@ -31,40 +31,24 @@ Open:
 
 ## Why not HTTPS probes?
 
-Many Cloudflare IPs won’t complete HTTPS the way you expect (SNI/certs/ciphers). CrimsonCLS uses **TCP handshake tests** to reliably measure reachability/latency.
+Many Cloudflare IPs won’t complete HTTPS the way you expect (SNI/certs/ciphers). CrimsonCF uses **TCP handshake tests** to reliably measure reachability/latency.
 
 ## Hosted UI vs running on user PC
 
-Browsers block calling `http://localhost:8787` from an `https://` hosted site (mixed content). If you want **real user-PC scanning**, use the Docker Compose setup above.
+Browsers block calling `http://localhost:...` from an `https://` hosted site (mixed content). If you want **real user-PC scanning**, run locally via Docker Compose.
 
-## Cloudflare DNS (Fastest IPs to A records)
+## Cloudflare Workers build error: `Unauthorized`
 
-In the **DNS** tab you can:
+If Cloudflare Git builds fail at `wrangler deploy` with `Unauthorized`, your build token is missing permissions.
 
-- select top N fastest IPs (from last scan)
-- filter by capabilities
-- replace existing A records for a hostname
+Fix:
 
-Use a scoped Cloudflare API token (Zone DNS Edit only for that zone).
-
-## Development
-
-```bash
-yarn install
-yarn dev
-```
-
-## Releases & Docker Images
-
-- GitHub Container Registry image: `ghcr.io/amir0zx/crimsoncls:latest`
+- In Cloudflare Workers Builds settings, create/use an API token that can deploy Workers + Containers + Durable Objects.
+- Ensure the build environment has `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (if your build system doesn’t inject them automatically).
 
 ## Persian README
 
 - `README.fa.md`
-
-## License
-
-TBD (choose MIT/Apache-2.0 if you want it fully open).
 
 ---
 

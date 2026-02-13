@@ -1616,7 +1616,7 @@ function App() {
           animate={{ opacity: 1, y: 0 }}
         >
           <div>
-            <p className="eyebrow">CrimsonCLS</p>
+            <p className="eyebrow">CrimsonCF</p>
             <h1>
               <span>CRIMSON</span> CLS SCANNER
             </h1>
@@ -3256,7 +3256,7 @@ function App() {
                             sni: vlessSettings.sni.trim(),
                             host: vlessSettings.host.trim(),
                             path: vlessSettings.path.trim() || "/",
-                            name: `CrimsonCLS-${i + 1}`,
+                            name: `CrimsonCF-${i + 1}`,
                           }),
                         )
                         .join("\n");

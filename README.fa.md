@@ -1,11 +1,11 @@
-# CrimsonCLS (کریمسون سی‌اِل‌اِس)
+# CrimsonCF (کریمسون سی‌اِف)
 
-**CrimsonCLS** یک اسکنر سریع IP برای بازه‌های Cloudflare است که با **L4 TCP Handshake** تست می‌کند (نه HTTPS)، نتایج را ذخیره می‌کند و خروجی‌های آماده برای ابزارهای پروکسی مثل **Xray / sing-box / Clash** می‌سازد.
+**CrimsonCF (CrimsonCloudFlare)** یک اسکنر سریع IP برای بازه‌های Cloudflare است که با **L4 TCP Handshake** تست می‌کند (نه HTTPS)، نتایج را ذخیره می‌کند و خروجی‌های آماده برای ابزارهای پروکسی مثل **Xray / sing-box / Clash** می‌سازد.
 
-## چرا CrimsonCLS؟
+## چرا CrimsonCF؟
 
 - تست واقعی در لایه ۴: فقط اتصال TCP را چک می‌کند، بنابراین خطاهایی مثل `ERR_SSL_VERSION_OR_CIPHER_MISMATCH` مشکل‌ساز نیست.
-- اسکن موازی (Multi-thread/Concurrency)
+- اسکن موازی (Concurrency)
 - تاریخچه اسکن و خروجی‌گیری
 - گروه‌بندی و صفحه‌بندی بازه‌های IP
 - خروجی TXT (هر IP در یک خط)
@@ -22,26 +22,15 @@ docker compose up -d
 سپس:
 
 - UI و Probe روی سیستم شما اجرا می‌شوند: `http://localhost:8080`
-- این حالت بهترین گزینه برای گرفتن نتایج واقعی از اینترنت شماست.
 
-## نسخه آنلاین (Demo)
+## خطای Cloudflare Deploy: `Unauthorized`
 
-اگر UI را روی دامنه HTTPS باز کنید، مرورگر اجازه اتصال به `http://localhost:...` را نمی‌دهد (Mixed Content).
+اگر Cloudflare Git Build در مرحله `wrangler deploy` خطای `Unauthorized` داد، یعنی توکن Build مجوز کافی ندارد.
 
-برای اینکه اسکن روی سیستم کاربر انجام شود، بهتر است کل برنامه را **محلی** اجرا کنید (Docker Compose).
+راه‌حل:
 
-## خروجی‌های پروکسی
-
-در تب **Export** می‌توانید خروجی JSON برای Xray/sing-box و YAML/JSON برای Clash تولید کنید.
-
-## امنیت
-
-- برای تب DNS باید Cloudflare API Token با دسترسی محدود (DNS Edit فقط برای همان Zone) بسازید.
-- توکن در مرورگر و `localStorage` ذخیره می‌شود.
-
-## لینک‌ها
-
-- سازنده: `github.com/amir0zx`
+- یک API Token بسازید که اجازه Deploy برای Workers + Containers + Durable Objects داشته باشد.
+- اگر سیستم Build خودش مقداردهی نمی‌کند، `CLOUDFLARE_API_TOKEN` و `CLOUDFLARE_ACCOUNT_ID` را به Secrets اضافه کنید.
 
 ---
 

@@ -1966,9 +1966,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"crimsoncls@workspace:.":
+"crimsoncf@workspace:.":
   version: 0.0.0-use.local
-  resolution: "crimsoncls@workspace:."
+  resolution: "crimsoncf@workspace:."
   dependencies:
     "@cloudflare/containers": "npm:^0.1.0"
     "@eslint/js": "npm:^9.39.1"
