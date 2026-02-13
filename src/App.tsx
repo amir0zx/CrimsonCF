@@ -19,9 +19,6 @@ import {
   AreaChart,
   Bar,
   BarChart,
-  Cell,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -40,7 +37,7 @@ type Tab =
   | "analytics"
   | "export";
 
-type ExportFormat = "txt" | "csv" | "json" | "xlsx";
+type ExportFormat = "txt" | "json" | "xlsx";
 
 type ExportRow = Record<string, string | number | null>;
 
@@ -58,6 +55,9 @@ type ScanResult = {
   ipAddress: string;
   ipRange: string;
   overall: ProbeState;
+  // Full L4 results for all tested ports (required for capability tags + exports).
+  // Older stored results may not have this field; we migrate them on load.
+  l4?: ProbeResponse["l4"];
   tcp80: ProbeState;
   tcp443: ProbeState;
   tcp2053: ProbeState;
@@ -65,6 +65,22 @@ type ScanResult = {
   openPorts: number;
   latency: number | null;
   createdAt: string;
+};
+
+type CapabilityId = "cdn" | "tunnel" | "warp" | "bpb";
+
+type CapabilityFlags = Record<CapabilityId, boolean>;
+
+type ProxyExportProtocol = "vless_ws_tls" | "trojan_ws_tls";
+
+type ProxyExportSettings = {
+  protocol: ProxyExportProtocol;
+  secret: string; // UUID (vless) or password (trojan)
+  sni: string;
+  host: string;
+  path: string;
+  preferredPortsCsv: string; // e.g. "443,2053,8443"
+  includeCaps: CapabilityId[]; // filter nodes by capabilities; empty = no filter
 };
 
 type ScanBatch = {
@@ -100,6 +116,7 @@ const STORAGE_KEYS = {
   results: "cftun_results_v2",
   ranges: "cftun_ranges_v2",
   sources: "cftun_sources_v2",
+  proxyExport: "cftun_proxy_export_v1",
 };
 
 const DEFAULT_RANGES = [
@@ -144,19 +161,6 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-function toCsv(rows: ExportRow[]): string {
-  if (rows.length === 0) return "";
-  const headers = Object.keys(rows[0]);
-  const esc = (v: unknown) => {
-    const s = String(v ?? "");
-    if (/[\",\\n]/.test(s)) return `\"${s.replace(/\"/g, '\"\"')}\"`;
-    return s;
-  };
-  const lines = [headers.join(",")];
-  for (const row of rows) lines.push(headers.map((h) => esc(row[h])).join(","));
-  return lines.join("\n");
-}
-
 function exportRows(
   format: ExportFormat,
   rows: ExportRow[],
@@ -170,11 +174,6 @@ function exportRows(
       new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }),
       `${name}.json`,
     );
-    return;
-  }
-
-  if (format === "csv") {
-    downloadBlob(new Blob([toCsv(rows)], { type: "text/csv" }), `${name}.csv`);
     return;
   }
 
@@ -300,6 +299,100 @@ function Progress({ value }: { value: number }) {
   );
 }
 
+function migrateStoredScanResult(raw: unknown): ScanResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Partial<ScanResult> & Record<string, unknown>;
+  if (
+    typeof r.id !== "string" ||
+    typeof r.batchId !== "string" ||
+    typeof r.ipAddress !== "string" ||
+    typeof r.ipRange !== "string" ||
+    typeof r.overall !== "string" ||
+    typeof r.createdAt !== "string"
+  )
+    return null;
+
+  const base: ScanResult = {
+    id: r.id,
+    batchId: r.batchId,
+    ipAddress: r.ipAddress,
+    ipRange: r.ipRange,
+    overall: r.overall as ProbeState,
+    tcp80: (r.tcp80 as ProbeState) ?? "failed",
+    tcp443: (r.tcp443 as ProbeState) ?? "failed",
+    tcp2053: (r.tcp2053 as ProbeState) ?? "failed",
+    tcp8443: (r.tcp8443 as ProbeState) ?? "failed",
+    openPorts: typeof r.openPorts === "number" ? r.openPorts : 0,
+    latency:
+      typeof r.latency === "number" || r.latency === null ? r.latency : null,
+    createdAt: r.createdAt,
+    l4: Array.isArray(r.l4)
+      ? (r.l4 as ProbeResponse["l4"])
+      : [
+          { port: 80, status: (r.tcp80 as ProbeState) ?? "failed", latency: null },
+          {
+            port: 443,
+            status: (r.tcp443 as ProbeState) ?? "failed",
+            latency: null,
+          },
+          {
+            port: 2053,
+            status: (r.tcp2053 as ProbeState) ?? "failed",
+            latency: null,
+          },
+          {
+            port: 8443,
+            status: (r.tcp8443 as ProbeState) ?? "failed",
+            latency: null,
+          },
+        ],
+  };
+  return base;
+}
+
+function l4Status(result: ScanResult, port: number): ProbeState {
+  const hit = result.l4?.find((p) => p.port === port);
+  if (hit) return hit.status;
+  // Fallback for legacy fields
+  if (port === 80) return result.tcp80;
+  if (port === 443) return result.tcp443;
+  if (port === 2053) return result.tcp2053;
+  if (port === 8443) return result.tcp8443;
+  return "failed";
+}
+
+function capabilityFlags(result: ScanResult): CapabilityFlags {
+  const cdn = l4Status(result, 80) === "success" || l4Status(result, 443) === "success";
+  const tunnel = l4Status(result, 7844) === "success";
+  // WARP is primarily UDP; this is a TCP-only heuristic for users who test TCP:2408.
+  const warp = l4Status(result, 2408) === "success";
+  const bpb = l4Status(result, 8080) === "success";
+  return { cdn, tunnel, warp, bpb };
+}
+
+function parsePreferredPorts(csv: string): number[] {
+  return csv
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
+}
+
+function pickOpenPort(result: ScanResult, preferred: number[]): number | null {
+  const open = new Set<number>(
+    (result.l4 || []).filter((p) => p.status === "success").map((p) => p.port),
+  );
+  for (const p of preferred) if (open.has(p)) return p;
+  const any = (result.l4 || []).find((p) => p.status === "success")?.port;
+  if (typeof any === "number") return any;
+  return preferred[0] ?? null;
+}
+
+function yamlEscape(s: string): string {
+  // Minimal YAML escaping sufficient for our generated Clash config.
+  if (/^[a-zA-Z0-9_.:/-]+$/.test(s)) return s;
+  return JSON.stringify(s);
+}
+
 async function probeIp(
   ip: string,
   ports: number[],
@@ -324,7 +417,9 @@ function App() {
     readStorage(STORAGE_KEYS.history, []),
   );
   const [allResults, setAllResults] = useState<ScanResult[]>(() =>
-    readStorage(STORAGE_KEYS.results, []),
+    readStorage<unknown[]>(STORAGE_KEYS.results, [])
+      .map(migrateStoredScanResult)
+      .filter((v): v is ScanResult => v != null),
   );
   const [sources, setSources] = useState<SourceItem[]>(() =>
     readStorage(STORAGE_KEYS.sources, []),
@@ -342,7 +437,7 @@ function App() {
   const [sourceName, setSourceName] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [portToggles, setPortToggles] = useState<number[]>([
-    80, 443, 7844, 2053, 2083, 2087, 2096, 8443,
+    80, 443, 7844, 2053, 2083, 2087, 2096, 8443, 8080, 2408,
   ]);
   const [customPort, setCustomPort] = useState("");
   const [scanWorkers, setScanWorkers] = useState(20);
@@ -357,6 +452,19 @@ function App() {
   >("all");
   const [resultFilterMinOpen, setResultFilterMinOpen] = useState(0);
   const [resultOnlyLastBatch, setResultOnlyLastBatch] = useState(true);
+  const [resultFilterCaps, setResultFilterCaps] = useState<CapabilityId[]>([]);
+
+  const [proxyExport, setProxyExport] = useState<ProxyExportSettings>(() =>
+    readStorage<ProxyExportSettings>(STORAGE_KEYS.proxyExport, {
+      protocol: "vless_ws_tls",
+      secret: "",
+      sni: "",
+      host: "",
+      path: "/",
+      preferredPortsCsv: "443,2053,8443,80",
+      includeCaps: ["cdn"],
+    }),
+  );
 
   const runRef = useRef(false);
   const abortersRef = useRef<AbortController[]>([]);
@@ -391,6 +499,7 @@ function App() {
   useEffect(() => writeStorage(STORAGE_KEYS.history, history), [history]);
   useEffect(() => writeStorage(STORAGE_KEYS.results, allResults), [allResults]);
   useEffect(() => writeStorage(STORAGE_KEYS.sources, sources), [sources]);
+  useEffect(() => writeStorage(STORAGE_KEYS.proxyExport, proxyExport), [proxyExport]);
 
   const mergedResults = liveResults.length ? liveResults : allResults;
 
@@ -399,6 +508,7 @@ function App() {
     const failed = mergedResults.filter((r) => r.overall === "failed").length;
     const timeout = mergedResults.filter(
       (r) =>
+        r.l4?.some((p) => p.status === "timeout") ||
         r.tcp80 === "timeout" ||
         r.tcp443 === "timeout" ||
         r.tcp2053 === "timeout" ||
@@ -448,10 +558,16 @@ function App() {
     if (resultFilterStatus !== "all")
       base = base.filter((r) => r.overall === resultFilterStatus);
     base = base.filter((r) => r.openPorts >= resultFilterMinOpen);
+    if (resultFilterCaps.length)
+      base = base.filter((r) => {
+        const caps = capabilityFlags(r);
+        return resultFilterCaps.every((id) => caps[id]);
+      });
     return [...base].sort((a, b) => (a.latency ?? 1e9) - (b.latency ?? 1e9));
   }, [
     currentBatch,
     mergedResults,
+    resultFilterCaps,
     resultFilterMinOpen,
     resultFilterQuery,
     resultFilterStatus,
@@ -465,6 +581,41 @@ function App() {
     return [...map.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([openPorts, count]) => ({ openPorts, count }));
+  }, [filteredResults]);
+
+  const fastestIps = useMemo(() => {
+    return filteredResults
+      .filter((r) => r.overall === "success" && r.latency != null)
+      .slice(0, 12);
+  }, [filteredResults]);
+
+  const capabilityDist = useMemo(() => {
+    const acc = new Map<CapabilityId, number>([
+      ["cdn", 0],
+      ["tunnel", 0],
+      ["warp", 0],
+      ["bpb", 0],
+    ]);
+    for (const r of filteredResults) {
+      const caps = capabilityFlags(r);
+      (Object.keys(acc) as CapabilityId[]).forEach((k) => {
+        if (caps[k]) acc.set(k, (acc.get(k) ?? 0) + 1);
+      });
+    }
+    return (["cdn", "tunnel", "warp", "bpb"] as const).map((k) => ({
+      name: k.toUpperCase(),
+      count: acc.get(k) ?? 0,
+    }));
+  }, [filteredResults]);
+
+  const portSuccessDist = useMemo(() => {
+    const ports = [80, 443, 2053, 8443, 7844, 8080, 2408];
+    return ports.map((port) => ({
+      port,
+      success: filteredResults.filter((r) => l4Status(r, port) === "success")
+        .length,
+      total: filteredResults.length,
+    }));
   }, [filteredResults]);
 
   const latencyBuckets = useMemo(() => {
@@ -664,6 +815,7 @@ function App() {
           ipAddress: target.ip,
           ipRange: target.range,
           overall: probe.overall,
+          l4: probe.l4,
           tcp80,
           tcp443,
           tcp2053,
@@ -820,6 +972,10 @@ function App() {
     filenameBase: string,
   ): void {
     const tableRows: ExportRow[] = rows.map((r) => ({
+      cdn: capabilityFlags(r).cdn ? 1 : 0,
+      tunnel: capabilityFlags(r).tunnel ? 1 : 0,
+      warp_tcp_heuristic: capabilityFlags(r).warp ? 1 : 0,
+      bpb: capabilityFlags(r).bpb ? 1 : 0,
       ip: r.ipAddress,
       range: r.ipRange,
       overall: r.overall,
@@ -832,6 +988,284 @@ function App() {
       time: r.createdAt,
     }));
     exportRows(format, tableRows, filenameBase);
+  }
+
+  function exportCapabilityIpsTxt(cap: CapabilityId, filenameBase: string): void {
+    if (!currentBatch) {
+      toast.error("No last scan to export");
+      return;
+    }
+    const rows = currentBatchResults
+      .filter((r) => r.overall === "success")
+      .filter((r) => capabilityFlags(r)[cap])
+      .map((r) => ({ ip: r.ipAddress }));
+    exportRows("txt", rows, filenameBase);
+  }
+
+  function downloadProxyConfigs(kind: "xray" | "singbox" | "clash_yaml" | "clash_json"): void {
+    if (!currentBatch) {
+      toast.error("No last scan to export");
+      return;
+    }
+    if (!proxyExport.secret.trim()) {
+      toast.error(proxyExport.protocol === "trojan_ws_tls" ? "Password required" : "UUID required");
+      return;
+    }
+    if (!proxyExport.sni.trim() || !proxyExport.host.trim()) {
+      toast.error("SNI + Host required");
+      return;
+    }
+    const preferredPorts = parsePreferredPorts(proxyExport.preferredPortsCsv);
+    const base = currentBatchResults.filter((r) => r.overall === "success");
+    const filtered =
+      proxyExport.includeCaps.length === 0
+        ? base
+        : base.filter((r) => {
+            const caps = capabilityFlags(r);
+            return proxyExport.includeCaps.every((c) => caps[c]);
+          });
+
+    const nodes = filtered
+      .map((r) => ({ r, port: pickOpenPort(r, preferredPorts) }))
+      .filter((x): x is { r: ScanResult; port: number } => typeof x.port === "number");
+
+    if (!nodes.length) {
+      toast.error("No nodes matched filter/ports");
+      return;
+    }
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const proto = proxyExport.protocol;
+    const sni = proxyExport.sni.trim();
+    const host = proxyExport.host.trim();
+    const path = proxyExport.path.trim() || "/";
+    const secret = proxyExport.secret.trim();
+
+    if (kind === "singbox") {
+      const outbounds = nodes.map(({ r, port }) => {
+        const tag = `${r.ipAddress}:${port}`;
+        if (proto === "trojan_ws_tls") {
+          return {
+            type: "trojan",
+            tag,
+            server: r.ipAddress,
+            server_port: port,
+            password: secret,
+            tls: { enabled: true, server_name: sni, insecure: false },
+            transport: { type: "ws", path, headers: { Host: host } },
+          };
+        }
+        return {
+          type: "vless",
+          tag,
+          server: r.ipAddress,
+          server_port: port,
+          uuid: secret,
+          tls: { enabled: true, server_name: sni, insecure: false },
+          transport: { type: "ws", path, headers: { Host: host } },
+        };
+      });
+
+      const selectorTag = "Proxy";
+      const config = {
+        log: { level: "warn" },
+        inbounds: [
+          { type: "socks", tag: "socks-in", listen: "127.0.0.1", listen_port: 10808 },
+          { type: "http", tag: "http-in", listen: "127.0.0.1", listen_port: 10809 },
+        ],
+        outbounds: [
+          {
+            type: "selector",
+            tag: selectorTag,
+            outbounds: outbounds.map((o) => o.tag),
+            default: outbounds[0]?.tag,
+          },
+          ...outbounds,
+          { type: "direct", tag: "direct" },
+          { type: "block", tag: "block" },
+        ],
+        route: {
+          rules: [
+            { inbound: ["socks-in", "http-in"], outbound: selectorTag },
+          ],
+        },
+      };
+
+      downloadBlob(
+        new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }),
+        `crimsoncls_sing-box_${proto}_${ts}.json`,
+      );
+      return;
+    }
+
+    if (kind === "xray") {
+      const outbounds = nodes.map(({ r, port }) => {
+        const tag = `${r.ipAddress}:${port}`;
+        const baseStream = {
+          network: "ws",
+          security: "tls",
+          tlsSettings: { serverName: sni, allowInsecure: false },
+          wsSettings: { path, headers: { Host: host } },
+        };
+        if (proto === "trojan_ws_tls") {
+          return {
+            tag,
+            protocol: "trojan",
+            settings: { servers: [{ address: r.ipAddress, port, password: secret }] },
+            streamSettings: baseStream,
+          };
+        }
+        return {
+          tag,
+          protocol: "vless",
+          settings: {
+            vnext: [
+              {
+                address: r.ipAddress,
+                port,
+                users: [{ id: secret, encryption: "none" }],
+              },
+            ],
+          },
+          streamSettings: baseStream,
+        };
+      });
+
+      const balancerTag = "crimsoncls-auto";
+      const config = {
+        log: { loglevel: "warning" },
+        inbounds: [
+          {
+            port: 10808,
+            listen: "127.0.0.1",
+            protocol: "socks",
+            settings: { udp: true },
+          },
+          { port: 10809, listen: "127.0.0.1", protocol: "http" },
+        ],
+        outbounds: [
+          ...outbounds,
+          { tag: "direct", protocol: "freedom" },
+          { tag: "block", protocol: "blackhole" },
+        ],
+        routing: {
+          domainStrategy: "AsIs",
+          balancers: [
+            {
+              tag: balancerTag,
+              selector: outbounds.map((o) => o.tag),
+              strategy: { type: "random" },
+            },
+          ],
+          rules: [{ type: "field", balancerTag }],
+        },
+      };
+
+      downloadBlob(
+        new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }),
+        `crimsoncls_xray_${proto}_${ts}.json`,
+      );
+      return;
+    }
+
+    // Clash Meta oriented output.
+    const clashProxies = nodes.map(({ r, port }) => {
+      const name = `CF ${r.ipAddress}:${port}`;
+      if (proto === "trojan_ws_tls") {
+        return {
+          name,
+          type: "trojan",
+          server: r.ipAddress,
+          port,
+          password: secret,
+          udp: true,
+          sni,
+          "skip-cert-verify": false,
+          network: "ws",
+          "ws-opts": { path, headers: { Host: host } },
+        };
+      }
+      return {
+        name,
+        type: "vless",
+        server: r.ipAddress,
+        port,
+        uuid: secret,
+        udp: true,
+        tls: true,
+        servername: sni,
+        network: "ws",
+        "ws-opts": { path, headers: { Host: host } },
+      };
+    });
+
+    const clash = {
+      port: 7890,
+      "socks-port": 7891,
+      "allow-lan": true,
+      mode: "rule",
+      "log-level": "info",
+      proxies: clashProxies,
+      "proxy-groups": [
+        {
+          name: "Proxy",
+          type: "select",
+          proxies: ["Auto", ...clashProxies.map((p) => p.name)],
+        },
+        {
+          name: "Auto",
+          type: "url-test",
+          url: "http://www.gstatic.com/generate_204",
+          interval: 300,
+          tolerance: 50,
+          proxies: clashProxies.map((p) => p.name),
+        },
+      ],
+      rules: ["MATCH,Proxy"],
+    };
+
+    if (kind === "clash_json") {
+      downloadBlob(
+        new Blob([JSON.stringify(clash, null, 2)], { type: "application/json" }),
+        `crimsoncls_clash_${proto}_${ts}.json`,
+      );
+      return;
+    }
+
+    const lines: string[] = [];
+    const pushKV = (k: string, v: unknown, indent = 0) => {
+      const pad = "  ".repeat(indent);
+      if (typeof v === "string") lines.push(`${pad}${k}: ${yamlEscape(v)}`);
+      else if (typeof v === "number" || typeof v === "boolean")
+        lines.push(`${pad}${k}: ${String(v)}`);
+      else if (Array.isArray(v)) {
+        lines.push(`${pad}${k}:`);
+        for (const item of v) {
+          if (item && typeof item === "object") {
+            lines.push(`${pad}-`);
+            Object.entries(item as Record<string, unknown>).forEach(([kk, vv]) =>
+              pushKV(kk, vv, indent + 1),
+            );
+          } else {
+            lines.push(`${pad}- ${yamlEscape(String(item))}`);
+          }
+        }
+      } else if (v && typeof v === "object") {
+        lines.push(`${pad}${k}:`);
+        Object.entries(v as Record<string, unknown>).forEach(([kk, vv]) =>
+          pushKV(kk, vv, indent + 1),
+        );
+      } else {
+        lines.push(`${pad}${k}: null`);
+      }
+    };
+
+    Object.entries(clash as Record<string, unknown>).forEach(([k, v]) => pushKV(k, v, 0));
+    const yaml = lines.join("\n");
+    downloadBlob(
+      new Blob([yaml], { type: "text/yaml" }),
+      `crimsoncls_clash_${proto}_${ts}.yaml`,
+    );
   }
 
   return (
@@ -1357,9 +1791,11 @@ function App() {
                   Status
                   <select
                     value={resultFilterStatus}
-                    onChange={(e) =>
-                      setResultFilterStatus(e.target.value as any)
-                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "all" || v === "success" || v === "failed")
+                        setResultFilterStatus(v);
+                    }}
                   >
                     <option value="all">all</option>
                     <option value="success">success</option>
@@ -1388,6 +1824,32 @@ function App() {
                   />
                   Only last scan
                 </label>
+                <div className="caps-filter">
+                  <span className="caps-label">Capabilities</span>
+                  {(
+                    [
+                      ["cdn", "CDN"],
+                      ["tunnel", "Tunnel"],
+                      ["warp", "WARP*"],
+                      ["bpb", "BPB"],
+                    ] as const
+                  ).map(([id, label]) => (
+                    <label key={id} className="checkbox-row mini">
+                      <input
+                        type="checkbox"
+                        checked={resultFilterCaps.includes(id)}
+                        onChange={(e) =>
+                          setResultFilterCaps((prev) =>
+                            e.target.checked
+                              ? [...prev, id]
+                              : prev.filter((x) => x !== id),
+                          )
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
                 <button
                   className="btn ghost"
                   type="button"
@@ -1407,6 +1869,10 @@ function App() {
                 <table>
                   <thead>
                     <tr>
+                      <th>CDN</th>
+                      <th>Tunnel</th>
+                      <th>WARP*</th>
+                      <th>BPB</th>
                       <th>IP</th>
                       <th>Range</th>
                       <th>Overall</th>
@@ -1420,20 +1886,35 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredResults.slice(0, 500).map((r) => (
-                      <tr key={r.id}>
-                        <td>{r.ipAddress}</td>
-                        <td>{r.ipRange}</td>
-                        <td className={`st ${r.overall}`}>{r.overall}</td>
-                        <td className={`st ${r.tcp80}`}>{r.tcp80}</td>
-                        <td className={`st ${r.tcp443}`}>{r.tcp443}</td>
-                        <td className={`st ${r.tcp2053}`}>{r.tcp2053}</td>
-                        <td className={`st ${r.tcp8443}`}>{r.tcp8443}</td>
-                        <td>{r.openPorts}</td>
-                        <td>{r.latency ?? "-"}</td>
-                        <td>{new Date(r.createdAt).toLocaleTimeString()}</td>
-                      </tr>
-                    ))}
+                    {filteredResults.slice(0, 500).map((r) => {
+                      const caps = capabilityFlags(r);
+                      return (
+                        <tr key={r.id}>
+                          <td className={caps.cdn ? "cap yes" : "cap no"}>
+                            {caps.cdn ? "yes" : "no"}
+                          </td>
+                          <td className={caps.tunnel ? "cap yes" : "cap no"}>
+                            {caps.tunnel ? "yes" : "no"}
+                          </td>
+                          <td className={caps.warp ? "cap yes" : "cap no"}>
+                            {caps.warp ? "yes" : "no"}
+                          </td>
+                          <td className={caps.bpb ? "cap yes" : "cap no"}>
+                            {caps.bpb ? "yes" : "no"}
+                          </td>
+                          <td>{r.ipAddress}</td>
+                          <td>{r.ipRange}</td>
+                          <td className={`st ${r.overall}`}>{r.overall}</td>
+                          <td className={`st ${r.tcp80}`}>{r.tcp80}</td>
+                          <td className={`st ${r.tcp443}`}>{r.tcp443}</td>
+                          <td className={`st ${r.tcp2053}`}>{r.tcp2053}</td>
+                          <td className={`st ${r.tcp8443}`}>{r.tcp8443}</td>
+                          <td>{r.openPorts}</td>
+                          <td>{r.latency ?? "-"}</td>
+                          <td>{new Date(r.createdAt).toLocaleTimeString()}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1490,21 +1971,9 @@ function App() {
                 <h4>Result Distribution</h4>
                 <div className="chart-wrap">
                   <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={pieData}
-                        dataKey="value"
-                        nameKey="name"
-                        outerRadius={90}
-                        label
-                      >
-                        {pieData.map((entry, i) => (
-                          <Cell
-                            key={entry.name}
-                            fill={["#ff4f4f", "#5d0000", "#ffb366"][i % 3]}
-                          />
-                        ))}
-                      </Pie>
+                    <BarChart data={pieData}>
+                      <XAxis dataKey="name" stroke="#9a5b5b" />
+                      <YAxis stroke="#9a5b5b" allowDecimals={false} />
                       <Tooltip
                         contentStyle={{
                           background: "#130707",
@@ -1512,8 +1981,39 @@ function App() {
                           color: "#ffd9d9",
                         }}
                       />
-                    </PieChart>
+                      <Bar dataKey="value" fill="#ff4f4f" />
+                    </BarChart>
                   </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="chart-card">
+                <h4>Top Fastest (Filtered)</h4>
+                <div className="mini-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th>Port</th>
+                        <th>Latency</th>
+                        <th>CDN</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fastestIps.map((r) => {
+                        const caps = capabilityFlags(r);
+                        const port =
+                          r.l4?.find((p) => p.status === "success")?.port ?? "-";
+                        return (
+                          <tr key={r.id}>
+                            <td>{r.ipAddress}</td>
+                            <td>{port}</td>
+                            <td>{r.latency ?? "-"}</td>
+                            <td>{caps.cdn ? "yes" : "no"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               </article>
               <article className="chart-card">
@@ -1554,6 +2054,44 @@ function App() {
                   </ResponsiveContainer>
                 </div>
               </article>
+              <article className="chart-card">
+                <h4>Capabilities (Filtered)</h4>
+                <div className="chart-wrap">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={capabilityDist}>
+                      <XAxis dataKey="name" stroke="#9a5b5b" />
+                      <YAxis stroke="#9a5b5b" allowDecimals={false} />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#130707",
+                          border: "1px solid #4d1a1a",
+                          color: "#ffd9d9",
+                        }}
+                      />
+                      <Bar dataKey="count" fill="#ffb366" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
+              <article className="chart-card">
+                <h4>Per-Port Success (Filtered)</h4>
+                <div className="chart-wrap">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={portSuccessDist}>
+                      <XAxis dataKey="port" stroke="#9a5b5b" />
+                      <YAxis stroke="#9a5b5b" allowDecimals={false} />
+                      <Tooltip
+                        contentStyle={{
+                          background: "#130707",
+                          border: "1px solid #4d1a1a",
+                          color: "#ffd9d9",
+                        }}
+                      />
+                      <Bar dataKey="success" fill="#ff4f4f" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </article>
             </div>
           )}
 
@@ -1577,19 +2115,6 @@ function App() {
                       }
                     >
                       TXT
-                    </button>
-                    <button
-                      className="btn ghost"
-                      type="button"
-                      onClick={() =>
-                        exportValidIps(
-                          "csv",
-                          "last",
-                          "crimsoncls_valid_ips_last",
-                        )
-                      }
-                    >
-                      CSV
                     </button>
                     <button
                       className="btn ghost"
@@ -1637,15 +2162,6 @@ function App() {
                       className="btn ghost"
                       type="button"
                       onClick={() =>
-                        exportValidIps("csv", "all", "crimsoncls_valid_ips_all")
-                      }
-                    >
-                      CSV
-                    </button>
-                    <button
-                      className="btn ghost"
-                      type="button"
-                      onClick={() =>
                         exportValidIps(
                           "json",
                           "all",
@@ -1680,19 +2196,6 @@ function App() {
                       type="button"
                       onClick={() =>
                         exportResultsTable(
-                          "csv",
-                          filteredResults,
-                          "crimsoncls_results_table_filtered",
-                        )
-                      }
-                    >
-                      CSV
-                    </button>
-                    <button
-                      className="btn ghost"
-                      type="button"
-                      onClick={() =>
-                        exportResultsTable(
                           "json",
                           filteredResults,
                           "crimsoncls_results_table_filtered",
@@ -1713,6 +2216,193 @@ function App() {
                       }
                     >
                       XLSX
+                    </button>
+                  </div>
+                </article>
+
+                <article className="export-card">
+                  <h4>Capability Lists (Last Scan)</h4>
+                  <p>TXT export uses real new lines (one IP per line).</p>
+                  <div className="export-actions">
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() =>
+                        exportCapabilityIpsTxt("cdn", "crimsoncls_cdn_ips_last")
+                      }
+                    >
+                      CDN TXT
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() =>
+                        exportCapabilityIpsTxt(
+                          "tunnel",
+                          "crimsoncls_tunnel_ips_last",
+                        )
+                      }
+                    >
+                      Tunnel TXT
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() =>
+                        exportCapabilityIpsTxt(
+                          "warp",
+                          "crimsoncls_warp_tcp_heuristic_ips_last",
+                        )
+                      }
+                    >
+                      WARP* TXT
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() =>
+                        exportCapabilityIpsTxt("bpb", "crimsoncls_bpb_ips_last")
+                      }
+                    >
+                      BPB TXT
+                    </button>
+                  </div>
+                </article>
+
+                <article className="export-card">
+                  <h4>Xray / sing-box / Clash</h4>
+                  <p>Exports use your last scan, filtered by capabilities.</p>
+                  <div className="export-form">
+                    <label>
+                      Protocol
+                      <select
+                        value={proxyExport.protocol}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({
+                            ...p,
+                            protocol: e.target.value as ProxyExportProtocol,
+                          }))
+                        }
+                      >
+                        <option value="vless_ws_tls">vless + ws + tls</option>
+                        <option value="trojan_ws_tls">trojan + ws + tls</option>
+                      </select>
+                    </label>
+                    <label>
+                      {proxyExport.protocol === "trojan_ws_tls"
+                        ? "Password"
+                        : "UUID"}
+                      <input
+                        value={proxyExport.secret}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({ ...p, secret: e.target.value }))
+                        }
+                        placeholder={
+                          proxyExport.protocol === "trojan_ws_tls"
+                            ? "trojan password"
+                            : "uuid"
+                        }
+                      />
+                    </label>
+                    <label>
+                      SNI
+                      <input
+                        value={proxyExport.sni}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({ ...p, sni: e.target.value }))
+                        }
+                        placeholder="example.com"
+                      />
+                    </label>
+                    <label>
+                      Host
+                      <input
+                        value={proxyExport.host}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({ ...p, host: e.target.value }))
+                        }
+                        placeholder="example.com"
+                      />
+                    </label>
+                    <label>
+                      WS Path
+                      <input
+                        value={proxyExport.path}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({ ...p, path: e.target.value }))
+                        }
+                        placeholder="/"
+                      />
+                    </label>
+                    <label>
+                      Preferred Ports
+                      <input
+                        value={proxyExport.preferredPortsCsv}
+                        onChange={(e) =>
+                          setProxyExport((p) => ({
+                            ...p,
+                            preferredPortsCsv: e.target.value,
+                          }))
+                        }
+                        placeholder="443,2053,8443,80"
+                      />
+                    </label>
+                    <div className="caps-filter">
+                      <span className="caps-label">Include only:</span>
+                      {(
+                        [
+                          ["cdn", "CDN"],
+                          ["tunnel", "Tunnel"],
+                          ["warp", "WARP*"],
+                          ["bpb", "BPB"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <label key={id} className="checkbox-row mini">
+                          <input
+                            type="checkbox"
+                            checked={proxyExport.includeCaps.includes(id)}
+                            onChange={(e) =>
+                              setProxyExport((p) => ({
+                                ...p,
+                                includeCaps: e.target.checked
+                                  ? [...p.includeCaps, id]
+                                  : p.includeCaps.filter((x) => x !== id),
+                              }))
+                            }
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="export-actions">
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() => downloadProxyConfigs("xray")}
+                    >
+                      Xray JSON
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() => downloadProxyConfigs("singbox")}
+                    >
+                      sing-box JSON
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() => downloadProxyConfigs("clash_yaml")}
+                    >
+                      Clash YAML
+                    </button>
+                    <button
+                      className="btn ghost"
+                      type="button"
+                      onClick={() => downloadProxyConfigs("clash_json")}
+                    >
+                      Clash JSON
                     </button>
                   </div>
                 </article>
