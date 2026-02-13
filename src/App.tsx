@@ -155,6 +155,31 @@ function expandCidr(cidr: string, limit: number): string[] {
   return out;
 }
 
+function sampleCidr(cidr: string, limit: number, mode: 'sequential' | 'random'): string[] {
+  if (mode === 'sequential') return expandCidr(cidr, limit);
+  if (!isValidCidr(cidr)) return [];
+
+  const [ip, prefixRaw] = cidr.split('/');
+  const prefix = Number(prefixRaw);
+  const hostCount = 2 ** (32 - prefix);
+  const count = Math.min(hostCount, Math.max(1, limit));
+  const base = ipToInt(ip);
+
+  // CFScanner-inspired behavior: sample random IPs in each subnet rather than taking first N.
+  const picked = new Set<number>();
+  const maxIndex = Math.max(1, hostCount - 2);
+  const maxAttempts = Math.min(10_000, count * 50);
+
+  let attempts = 0;
+  while (picked.size < count && attempts < maxAttempts) {
+    attempts += 1;
+    const idx = 1 + Math.floor(Math.random() * maxIndex);
+    picked.add(idx);
+  }
+
+  return [...picked].map((idx) => intToIp((base + idx) >>> 0));
+}
+
 function extractCidrs(payload: unknown): string[] {
   const found = new Set<string>();
   const walk = (value: unknown): void => {
@@ -209,8 +234,9 @@ function App() {
 
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
-  const [portsInput, setPortsInput] = useState('80,443,2053,2083,2087,2096,8443');
+  const [portsInput, setPortsInput] = useState('80,443,7844,2053,2083,2087,2096,8443');
   const [scanWorkers, setScanWorkers] = useState(20);
+  const [sampleMode, setSampleMode] = useState<'sequential' | 'random'>('random');
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
@@ -367,7 +393,9 @@ function App() {
     pushLog('info', `Starting L4 scan on ports [${ports.join(', ')}] for ${selectedRanges.length} ranges`);
 
     const startedAt = Date.now();
-    const targets = selectedRanges.flatMap((range) => expandCidr(range, ipsPerRange).map((ip) => ({ ip, range })));
+    const targets = selectedRanges.flatMap((range) =>
+      sampleCidr(range, ipsPerRange, sampleMode).map((ip) => ({ ip, range }))
+    );
 
     if (!targets.length) {
       toast.error('No testable IPs from selection');
@@ -619,8 +647,20 @@ function App() {
               />
             </label>
             <label>
+              Sampling
+              <select value={sampleMode} onChange={(e) => setSampleMode(e.target.value as 'sequential' | 'random')}>
+                <option value="random">random</option>
+                <option value="sequential">sequential</option>
+              </select>
+            </label>
+            <label>
               Ports
-              <input type="text" value={portsInput} onChange={(e) => setPortsInput(e.target.value)} placeholder="80,443,2053,2083,2087,2096,8443" />
+              <input
+                type="text"
+                value={portsInput}
+                onChange={(e) => setPortsInput(e.target.value)}
+                placeholder="80,443,7844,2053,2083,2087,2096,8443"
+              />
             </label>
           </div>
 

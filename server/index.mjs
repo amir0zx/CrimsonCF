@@ -1,8 +1,13 @@
 import cors from 'cors';
 import express from 'express';
 import net from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 const app = express();
-const PORT = Number(process.env.PROBE_PORT || 8787);
+const PORT = Number(process.env.PORT || process.env.PROBE_PORT || 8787);
+const SERVE_STATIC = String(process.env.SERVE_STATIC || '').toLowerCase() === '1';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 app.use(
   cors({
@@ -42,13 +47,18 @@ function tcpProbe(host, port, timeoutMs = 1800) {
 }
 
 function normalizePorts(input) {
-  const defaultPorts = [80, 443, 2053, 2083, 2087, 2096, 8443];
+  // Include 7844 (Cloudflare Tunnel), plus common HTTPS alt ports
+  const defaultPorts = [80, 443, 7844, 2053, 2083, 2087, 2096, 8443];
   if (!Array.isArray(input)) return defaultPorts;
   const ports = input
     .map((p) => Number(p))
     .filter((p) => Number.isInteger(p) && p > 0 && p <= 65535);
   return ports.length ? [...new Set(ports)] : defaultPorts;
 }
+
+app.get('/health', (_req, res) => {
+  res.status(200).send('ok');
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'probe-server', ts: new Date().toISOString() });
@@ -78,6 +88,16 @@ app.post('/api/probe', async (req, res) => {
     l4,
   });
 });
+
+if (SERVE_STATIC) {
+  const distDir = path.resolve(__dirname, '..', 'dist');
+  app.use(express.static(distDir, { index: false }));
+
+  // SPA fallback: everything else becomes index.html
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`[probe-server] listening on http://localhost:${PORT}`);

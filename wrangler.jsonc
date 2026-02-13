@@ -1,0 +1,31 @@
+{
+  "$schema": "https://developers.cloudflare.com/wrangler/config-schema.json",
+  "name": "cftun-clone",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-02-13",
+
+  "containers": [
+    {
+      "class_name": "AppContainer",
+      "image": "./Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 10
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "APP_CONTAINER",
+        "class_name": "AppContainer"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AppContainer"]
+    }
+  ]
+}
