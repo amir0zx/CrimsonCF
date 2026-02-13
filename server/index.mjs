@@ -3,6 +3,7 @@ import express from 'express';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 const app = express();
 const PORT = Number(process.env.PORT || process.env.PROBE_PORT || 8787);
 const SERVE_STATIC = String(process.env.SERVE_STATIC || '').toLowerCase() === '1';
@@ -16,6 +17,29 @@ app.use(
   })
 );
 app.use(express.json());
+
+async function cfFetch(token, url, init = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json || json.success === false) {
+    const msg =
+      (json && (json.errors?.[0]?.message || json.messages?.[0]?.message)) ||
+      (json && json.error) ||
+      `Cloudflare API error (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.cf = json;
+    throw err;
+  }
+  return json;
+}
 
 function isValidIPv4(ip) {
   const parts = ip.split('.');
@@ -87,6 +111,73 @@ app.post('/api/probe', async (req, res) => {
     overall: anySuccess ? 'success' : 'failed',
     l4,
   });
+});
+
+app.post('/api/cf/dns/replace-a', async (req, res) => {
+  const token = String(req.body?.token || '').trim();
+  const zoneId = String(req.body?.zoneId || '').trim();
+  const name = String(req.body?.name || '').trim();
+  const proxied = Boolean(req.body?.proxied);
+  const ttl = Number(req.body?.ttl || 1);
+  const ips = Array.isArray(req.body?.ips) ? req.body.ips.map((x) => String(x).trim()) : [];
+
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  if (!zoneId) return res.status(400).json({ error: 'Missing zoneId' });
+  if (!name || !name.includes('.')) return res.status(400).json({ error: 'Invalid record name' });
+
+  const cleaned = ips.filter((ip) => isValidIPv4(ip));
+  if (cleaned.length === 0) return res.status(400).json({ error: 'No valid IPv4 addresses' });
+  if (cleaned.length > 50) return res.status(400).json({ error: 'Too many IPs (max 50)' });
+
+  try {
+    // List existing A records for this name and delete them (replace mode).
+    const listUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=A&name=${encodeURIComponent(
+      name,
+    )}&per_page=100`;
+    const listed = await cfFetch(token, listUrl, { method: 'GET' });
+    const existing = Array.isArray(listed.result) ? listed.result : [];
+
+    const deleted = [];
+    for (const rec of existing) {
+      if (!rec?.id) continue;
+      const delUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${rec.id}`;
+      await cfFetch(token, delUrl, { method: 'DELETE' });
+      deleted.push(rec.id);
+    }
+
+    const created = [];
+    for (const ip of cleaned) {
+      const payload = {
+        type: 'A',
+        name,
+        content: ip,
+        ttl: Number.isFinite(ttl) && ttl >= 1 ? ttl : 1,
+        proxied,
+        comment: `CrimsonCLS auto (${new Date().toISOString()})`,
+      };
+      const createUrl = `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`;
+      const out = await cfFetch(token, createUrl, { method: 'POST', body: JSON.stringify(payload) });
+      created.push({ id: out.result?.id, ip });
+    }
+
+    res.json({
+      ok: true,
+      replaced: {
+        name,
+        zoneId,
+        proxied,
+        ttl,
+        deletedCount: deleted.length,
+        createdCount: created.length,
+      },
+      created,
+    });
+  } catch (e) {
+    res.status(500).json({
+      error: e?.message || 'Cloudflare API failed',
+      requestId: crypto.randomUUID(),
+    });
+  }
 });
 
 if (SERVE_STATIC) {

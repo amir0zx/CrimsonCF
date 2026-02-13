@@ -362,6 +362,18 @@ th { position: sticky; top: 0; background: #190909; }
   border-radius: 999px;
 }
 
+.caps-block {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+.caps-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .mini-table {
   overflow: auto;
   max-height: 290px;

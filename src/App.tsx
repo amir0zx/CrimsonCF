@@ -35,7 +35,8 @@ type Tab =
   | "history"
   | "results"
   | "analytics"
-  | "export";
+  | "export"
+  | "dns";
 
 type ExportFormat = "txt" | "json" | "xlsx";
 
@@ -83,6 +84,19 @@ type ProxyExportSettings = {
   includeCaps: CapabilityId[]; // filter nodes by capabilities; empty = no filter
 };
 
+type DnsReplaceMode = "replace";
+
+type DnsSettings = {
+  token: string;
+  zoneId: string;
+  recordName: string;
+  topN: number;
+  proxied: boolean;
+  ttl: number; // 1 = auto
+  includeCaps: CapabilityId[];
+  mode: DnsReplaceMode;
+};
+
 type ScanBatch = {
   id: string;
   name: string;
@@ -117,6 +131,7 @@ const STORAGE_KEYS = {
   ranges: "cftun_ranges_v2",
   sources: "cftun_sources_v2",
   proxyExport: "cftun_proxy_export_v1",
+  dns: "cftun_dns_v1",
 };
 
 const DEFAULT_RANGES = [
@@ -408,6 +423,26 @@ async function probeIp(
   return (await response.json()) as ProbeResponse;
 }
 
+async function cfReplaceARecords(input: {
+  token: string;
+  zoneId: string;
+  name: string;
+  ips: string[];
+  proxied: boolean;
+  ttl: number;
+}): Promise<{ ok: boolean; replaced?: unknown; error?: string }> {
+  const res = await fetch("/api/cf/dns/replace-a", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const json = (await res.json().catch(() => null)) as
+    | { ok: boolean; replaced?: unknown; error?: string }
+    | null;
+  if (!res.ok || !json) throw new Error(json?.error || "Cloudflare API failed");
+  return json;
+}
+
 function App() {
   const [ranges, setRanges] = useState<string[]>(() =>
     readStorage(STORAGE_KEYS.ranges, DEFAULT_RANGES),
@@ -466,6 +501,19 @@ function App() {
     }),
   );
 
+  const [dnsSettings, setDnsSettings] = useState<DnsSettings>(() =>
+    readStorage<DnsSettings>(STORAGE_KEYS.dns, {
+      token: "",
+      zoneId: "",
+      recordName: "",
+      topN: 5,
+      proxied: true,
+      ttl: 1,
+      includeCaps: ["cdn"],
+      mode: "replace",
+    }),
+  );
+
   const runRef = useRef(false);
   const abortersRef = useRef<AbortController[]>([]);
 
@@ -500,6 +548,7 @@ function App() {
   useEffect(() => writeStorage(STORAGE_KEYS.results, allResults), [allResults]);
   useEffect(() => writeStorage(STORAGE_KEYS.sources, sources), [sources]);
   useEffect(() => writeStorage(STORAGE_KEYS.proxyExport, proxyExport), [proxyExport]);
+  useEffect(() => writeStorage(STORAGE_KEYS.dns, dnsSettings), [dnsSettings]);
 
   const mergedResults = liveResults.length ? liveResults : allResults;
 
@@ -915,6 +964,7 @@ function App() {
     { id: "results", label: "Results", icon: <Wifi size={14} /> },
     { id: "analytics", label: "Analytics", icon: <Gauge size={14} /> },
     { id: "export", label: "Export", icon: <Download size={14} /> },
+    { id: "dns", label: "DNS", icon: <Shield size={14} /> },
   ];
 
   const currentBatchResults = useMemo(() => {
@@ -1000,6 +1050,61 @@ function App() {
       .filter((r) => capabilityFlags(r)[cap])
       .map((r) => ({ ip: r.ipAddress }));
     exportRows("txt", rows, filenameBase);
+  }
+
+  const dnsCandidateIps = useMemo(() => {
+    if (!currentBatch) return [];
+    const base = currentBatchResults.filter((r) => r.overall === "success");
+    const filtered =
+      dnsSettings.includeCaps.length === 0
+        ? base
+        : base.filter((r) => {
+            const caps = capabilityFlags(r);
+            return dnsSettings.includeCaps.every((c) => caps[c]);
+          });
+    // Already sorted by latency in filteredResults, but here we re-sort to be explicit.
+    return [...filtered]
+      .sort((a, b) => (a.latency ?? 1e9) - (b.latency ?? 1e9))
+      .map((r) => r.ipAddress);
+  }, [currentBatch, currentBatchResults, dnsSettings.includeCaps]);
+
+  async function applyDns(): Promise<void> {
+    if (!currentBatch) {
+      toast.error("Run a scan first");
+      return;
+    }
+    const token = dnsSettings.token.trim();
+    const zoneId = dnsSettings.zoneId.trim();
+    const name = dnsSettings.recordName.trim();
+    if (!token) return void toast.error("Cloudflare API token required");
+    if (!zoneId) return void toast.error("Zone ID required");
+    if (!name || !name.includes(".")) return void toast.error("Record name invalid");
+
+    const n = Math.max(1, Math.min(50, dnsSettings.topN || 1));
+    const ips = dnsCandidateIps.slice(0, n);
+    if (!ips.length) return void toast.error("No IPs matched your filters");
+
+    try {
+      pushLog("info", `Cloudflare DNS replace: ${name} => ${ips.length} A records`);
+      const out = await cfReplaceARecords({
+        token,
+        zoneId,
+        name,
+        ips,
+        proxied: dnsSettings.proxied,
+        ttl: dnsSettings.ttl,
+      });
+      if (out.ok) {
+        toast.success(`DNS updated: ${name} (${ips.length} A records)`);
+        pushLog("ok", `DNS updated: ${name} (${ips.length} A records)`);
+      } else {
+        toast.error(out.error || "DNS update failed");
+        pushLog("error", `DNS update failed: ${out.error || "unknown error"}`);
+      }
+    } catch (e) {
+      toast.error((e as Error).message || "DNS update failed");
+      pushLog("error", `DNS update failed: ${(e as Error).message || "unknown"}`);
+    }
   }
 
   function downloadProxyConfigs(kind: "xray" | "singbox" | "clash_yaml" | "clash_json"): void {
@@ -2347,32 +2452,38 @@ function App() {
                         placeholder="443,2053,8443,80"
                       />
                     </label>
-                    <div className="caps-filter">
-                      <span className="caps-label">Include only:</span>
-                      {(
-                        [
-                          ["cdn", "CDN"],
-                          ["tunnel", "Tunnel"],
-                          ["warp", "WARP*"],
-                          ["bpb", "BPB"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <label key={id} className="checkbox-row mini">
-                          <input
-                            type="checkbox"
-                            checked={proxyExport.includeCaps.includes(id)}
-                            onChange={(e) =>
+                    <div className="caps-block">
+                      <div className="caps-label">Include only</div>
+                      <div className="caps-pills">
+                        {(
+                          [
+                            ["cdn", "CDN"],
+                            ["tunnel", "Tunnel"],
+                            ["warp", "WARP*"],
+                            ["bpb", "BPB"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              proxyExport.includeCaps.includes(id)
+                                ? "port-chip on"
+                                : "port-chip"
+                            }
+                            onClick={() =>
                               setProxyExport((p) => ({
                                 ...p,
-                                includeCaps: e.target.checked
-                                  ? [...p.includeCaps, id]
-                                  : p.includeCaps.filter((x) => x !== id),
+                                includeCaps: p.includeCaps.includes(id)
+                                  ? p.includeCaps.filter((x) => x !== id)
+                                  : [...p.includeCaps, id],
                               }))
                             }
-                          />
-                          {label}
-                        </label>
-                      ))}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                   <div className="export-actions">
@@ -2406,6 +2517,171 @@ function App() {
                     </button>
                   </div>
                 </article>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "dns" && (
+            <div className="panel-block">
+              <h3 className="export-title">Cloudflare DNS</h3>
+              <p className="empty">
+                Replace mode: removes existing A records for this name, then
+                creates new A records from the fastest IPs of your last scan.
+              </p>
+
+              <div className="export-card">
+                <h4>Settings</h4>
+                <div className="export-form">
+                  <label>
+                    API Token
+                    <input
+                      value={dnsSettings.token}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({ ...p, token: e.target.value }))
+                      }
+                      placeholder="Cloudflare API Token (DNS Edit)"
+                    />
+                  </label>
+                  <label>
+                    Zone ID
+                    <input
+                      value={dnsSettings.zoneId}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({ ...p, zoneId: e.target.value }))
+                      }
+                      placeholder="zone id"
+                    />
+                  </label>
+                  <label>
+                    Record Name
+                    <input
+                      value={dnsSettings.recordName}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({
+                          ...p,
+                          recordName: e.target.value,
+                        }))
+                      }
+                      placeholder="sub.domain.com"
+                    />
+                  </label>
+                  <label>
+                    Top N Fastest
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={dnsSettings.topN}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({
+                          ...p,
+                          topN: Math.max(1, Math.min(50, Number(e.target.value) || 1)),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={dnsSettings.proxied}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({
+                          ...p,
+                          proxied: e.target.checked,
+                        }))
+                      }
+                    />
+                    Proxied
+                  </label>
+                  <label>
+                    TTL
+                    <select
+                      value={dnsSettings.ttl}
+                      onChange={(e) =>
+                        setDnsSettings((p) => ({
+                          ...p,
+                          ttl: Number(e.target.value) || 1,
+                        }))
+                      }
+                    >
+                      <option value={1}>Auto</option>
+                      <option value={60}>60s</option>
+                      <option value={120}>120s</option>
+                      <option value={300}>300s</option>
+                    </select>
+                  </label>
+                  <div className="caps-block">
+                    <div className="caps-label">Include only</div>
+                    <div className="caps-pills">
+                      {(
+                        [
+                          ["cdn", "CDN"],
+                          ["tunnel", "Tunnel"],
+                          ["warp", "WARP*"],
+                          ["bpb", "BPB"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={
+                            dnsSettings.includeCaps.includes(id)
+                              ? "port-chip on"
+                              : "port-chip"
+                          }
+                          onClick={() =>
+                            setDnsSettings((p) => ({
+                              ...p,
+                              includeCaps: p.includeCaps.includes(id)
+                                ? p.includeCaps.filter((x) => x !== id)
+                                : [...p.includeCaps, id],
+                            }))
+                          }
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="export-actions">
+                  <button
+                    className="btn primary"
+                    type="button"
+                    onClick={applyDns}
+                  >
+                    Apply To Cloudflare DNS
+                  </button>
+                </div>
+              </div>
+
+              <div className="export-card" style={{ marginTop: 10 }}>
+                <h4>Preview (Last Scan)</h4>
+                <p>
+                  {currentBatch ? dnsCandidateIps.length : 0} matched, will use{" "}
+                  {currentBatch ? Math.min(dnsSettings.topN, dnsCandidateIps.length) : 0}
+                </p>
+                <div className="mini-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>IP</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dnsCandidateIps
+                        .slice(0, Math.min(25, Math.max(1, dnsSettings.topN)))
+                        .map((ip, i) => (
+                          <tr key={ip}>
+                            <td>{i + 1}</td>
+                            <td>{ip}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
