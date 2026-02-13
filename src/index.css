@@ -549,10 +549,14 @@ th { position: sticky; top: 0; background: #190909; }
 .port-chip.custom { background: #260909; }
 
 .ports-add {
-  display: grid;
-  grid-template-columns: 160px auto;
+  display: flex;
   gap: 8px;
+  align-items: center;
   margin-top: 10px;
+}
+
+.ports-add input {
+  width: 160px;
 }
 
 .results-filters {
