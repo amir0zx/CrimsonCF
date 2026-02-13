@@ -1,5 +1,7 @@
 # CrimsonCF (کریمسون سی‌اِف)
 
+[English](README.md) | [فارسی](README.fa.md)
+
 **CrimsonCF (CrimsonCloudFlare)** یک اسکنر سریع IP برای بازه‌های Cloudflare است که با **L4 TCP Handshake** تست می‌کند (نه HTTPS)، نتایج را ذخیره می‌کند و خروجی‌های آماده برای ابزارهای پروکسی مثل **Xray / sing-box / Clash** می‌سازد.
 
 ## چرا CrimsonCF؟
