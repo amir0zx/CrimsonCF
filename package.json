@@ -4,9 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"yarn dev:server\" \"yarn dev:client\"",
-    "dev:client": "vite",
-    "dev:server": "node server/index.mjs",
+    "dev": "concurrently -k \"node server/index.mjs\" \"vite\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

@@ -57,6 +57,7 @@ type ScanBatch = {
   id: string;
   name: string;
   createdAt: string;
+  durationMs?: number;
   status: BatchStatus;
   totalIps: number;
   scannedCount: number;
@@ -179,11 +180,12 @@ function Progress({ value }: { value: number }) {
   );
 }
 
-async function probeIp(ip: string, ports: number[]): Promise<ProbeResponse> {
+async function probeIp(ip: string, ports: number[], signal?: AbortSignal): Promise<ProbeResponse> {
   const response = await fetch('/api/probe', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ip, ports }),
+    signal,
   });
   if (!response.ok) throw new Error('Probe API error');
   return (await response.json()) as ProbeResponse;
@@ -208,10 +210,12 @@ function App() {
   const [sourceName, setSourceName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [portsInput, setPortsInput] = useState('80,443,2053,2083,2087,2096,8443');
+  const [scanWorkers, setScanWorkers] = useState(20);
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const runRef = useRef(false);
+  const abortersRef = useRef<AbortController[]>([]);
 
   function pushLog(level: LogEntry['level'], text: string): void {
     const entry: LogEntry = { id: crypto.randomUUID(), ts: new Date().toLocaleTimeString(), level, text };
@@ -270,6 +274,19 @@ function App() {
 
   function toggleRange(range: string): void {
     setSelectedRanges((prev) => (prev.includes(range) ? prev.filter((r) => r !== range) : [...prev, range]));
+  }
+
+  function clearLogs(): void {
+    setLogs([]);
+    toast.success('Logs cleared');
+  }
+
+  function clearResults(): void {
+    setLiveResults([]);
+    setAllResults([]);
+    setCurrentBatch(null);
+    toast.success('Results cleared');
+    pushLog('info', 'Results cleared');
   }
 
   async function addSource(): Promise<void> {
@@ -346,8 +363,10 @@ function App() {
     setIsScanning(true);
     setLiveResults([]);
     runRef.current = true;
+    abortersRef.current = [];
     pushLog('info', `Starting L4 scan on ports [${ports.join(', ')}] for ${selectedRanges.length} ranges`);
 
+    const startedAt = Date.now();
     const targets = selectedRanges.flatMap((range) => expandCidr(range, ipsPerRange).map((ip) => ({ ip, range })));
 
     if (!targets.length) {
@@ -377,11 +396,17 @@ function App() {
     let failed = 0;
     const resultsBuffer: ScanResult[] = [];
 
-    for (const target of targets) {
-      if (!runRef.current) break;
+    const workerCount = Math.max(1, Math.min(100, scanWorkers)); // keep it sane; backend opens sockets
+    let nextIndex = 0;
+
+    const runOne = async (target: { ip: string; range: string }) => {
+      if (!runRef.current) return;
+
+      const controller = new AbortController();
+      abortersRef.current.push(controller);
 
       try {
-        const probe = await probeIp(target.ip, ports);
+        const probe = await probeIp(target.ip, ports, controller.signal);
         const tcp80 = probe.l4.find((t) => t.port === 80)?.status || 'failed';
         const tcp443 = probe.l4.find((t) => t.port === 443)?.status || 'failed';
         const tcp2053 = probe.l4.find((t) => t.port === 2053)?.status || 'failed';
@@ -413,24 +438,42 @@ function App() {
 
         if (probe.overall === 'success') success += 1;
         else failed += 1;
-      } catch {
+      } catch (e) {
+        // AbortError = user hit Stop
         failed += 1;
-        pushLog('error', `${target.ip} => probe failed (API/network error)`);
+        const name = (e as { name?: string } | null)?.name;
+        if (name === 'AbortError') {
+          pushLog('warn', `${target.ip} => aborted`);
+        } else {
+          pushLog('error', `${target.ip} => probe failed (API/network error)`);
+        }
+      } finally {
+        scanned += 1;
+        setCurrentBatch((prev) =>
+          prev ? { ...prev, scannedCount: scanned, successCount: success, failedCount: failed } : prev
+        );
       }
+    };
 
-      scanned += 1;
-      setCurrentBatch((prev) =>
-        prev ? { ...prev, scannedCount: scanned, successCount: success, failedCount: failed } : prev
-      );
-    }
+    const workerLoop = async () => {
+      while (runRef.current) {
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= targets.length) break;
+        await runOne(targets[i]);
+      }
+    };
 
-    const finalStatus: BatchStatus = runRef.current ? 'completed' : 'cancelled';
+    await Promise.all(Array.from({ length: workerCount }, workerLoop));
+
+    const finalStatus: BatchStatus = runRef.current && scanned >= targets.length ? 'completed' : 'cancelled';
     const doneBatch: ScanBatch = {
       ...(currentBatch || baseBatch),
       status: finalStatus,
       scannedCount: scanned,
       successCount: success,
       failedCount: failed,
+      durationMs: Date.now() - startedAt,
     };
 
     setHistory((prev) => [doneBatch, ...prev].slice(0, 120));
@@ -450,6 +493,7 @@ function App() {
 
   function stopScan(): void {
     runRef.current = false;
+    abortersRef.current.forEach((c) => c.abort());
     pushLog('warn', 'Stop requested by user');
   }
 
@@ -467,6 +511,30 @@ function App() {
     { id: 'results', label: 'Results', icon: <Wifi size={14} /> },
     { id: 'analytics', label: 'Analytics', icon: <Gauge size={14} /> },
   ];
+
+  const currentBatchResults = useMemo(() => {
+    if (!currentBatch) return [];
+    return mergedResults.filter((r) => r.batchId === currentBatch.id);
+  }, [currentBatch, mergedResults]);
+
+  const summary = useMemo(() => {
+    if (!currentBatch) return null;
+    const portsOpenAvg =
+      currentBatchResults.length > 0
+        ? Math.round(
+            currentBatchResults.reduce((acc, r) => acc + r.openPorts, 0) / currentBatchResults.length
+          )
+        : 0;
+    return {
+      status: currentBatch.status,
+      total: currentBatch.totalIps,
+      scanned: currentBatch.scannedCount,
+      success: currentBatch.successCount,
+      failed: currentBatch.failedCount,
+      durationMs: currentBatch.durationMs ?? null,
+      portsOpenAvg,
+    };
+  }, [currentBatch, currentBatchResults]);
 
   return (
     <div className="ui-root">
@@ -528,10 +596,28 @@ function App() {
           <div className="top-controls">
             <label>
               IPs per range
-              <input type="number" min={1} max={30} value={ipsPerRange} onChange={(e) => setIpsPerRange(Math.max(1, Math.min(30, Number(e.target.value) || 1)))} />
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={ipsPerRange}
+                onChange={(e) =>
+                  setIpsPerRange(Math.max(1, Math.min(50, Number(e.target.value) || 1)))
+                }
+              />
             </label>
             <div className="meta">Estimated IPs: {selectedRanges.length * ipsPerRange}</div>
             <div className="meta">L4 mode: TCP handshake only (connect test)</div>
+            <label>
+              Workers
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={scanWorkers}
+                onChange={(e) => setScanWorkers(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+              />
+            </label>
             <label>
               Ports
               <input type="text" value={portsInput} onChange={(e) => setPortsInput(e.target.value)} placeholder="80,443,2053,2083,2087,2096,8443" />
@@ -545,6 +631,27 @@ function App() {
                 <span>{currentBatch?.scannedCount || 0}/{currentBatch?.totalIps || 0}</span>
               </div>
               <Progress value={progress} />
+            </div>
+          )}
+
+          {summary && !isScanning && (
+            <div className="summary-card">
+              <div className="summary-head">
+                <strong>Last Scan Summary</strong>
+                <span className={`badge ${summary.status}`}>{summary.status}</span>
+              </div>
+              <div className="summary-grid">
+                <div><span>Total</span><b>{summary.total}</b></div>
+                <div><span>Scanned</span><b>{summary.scanned}</b></div>
+                <div><span>Success</span><b>{summary.success}</b></div>
+                <div><span>Failed</span><b>{summary.failed}</b></div>
+                <div><span>Avg Open Ports</span><b>{summary.portsOpenAvg}</b></div>
+                <div><span>Duration</span><b>{summary.durationMs ? `${Math.round(summary.durationMs / 1000)}s` : '-'}</b></div>
+              </div>
+              <div className="summary-actions">
+                <button className="btn ghost" type="button" onClick={clearResults}>Clear Results</button>
+                <button className="btn ghost" type="button" onClick={clearLogs}>Clear Logs</button>
+              </div>
             </div>
           )}
 
@@ -562,6 +669,8 @@ function App() {
               <div className="row-tools">
                 <button className="btn ghost" onClick={() => setSelectedRanges(selectedRanges.length === ranges.length ? [] : [...ranges])} type="button">{selectedRanges.length === ranges.length ? 'Unselect All' : 'Select All'}</button>
                 <button className="btn ghost" onClick={() => setSelectedRanges([])} type="button">Clear</button>
+                <button className="btn ghost" onClick={clearLogs} type="button">Clear Logs</button>
+                <button className="btn ghost" onClick={clearResults} type="button">Clear Results</button>
               </div>
               <div className="cidr-grid">
                 {ranges.map((r) => (
