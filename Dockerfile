@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.4
 
 FROM node:22-alpine AS build
 WORKDIR /app
 
 # Yarn v1 is fine here
 COPY package.json yarn.lock ./
-RUN yarn config set registry https://registry.npmjs.org \
+RUN --network=host yarn config set registry https://registry.npmjs.org \
   && yarn install --frozen-lockfile --network-timeout 600000
 
 COPY . .
@@ -19,7 +19,7 @@ ENV PORT=8080
 ENV SERVE_STATIC=1
 
 COPY package.json yarn.lock ./
-RUN yarn config set registry https://registry.npmjs.org \
+RUN --network=host yarn config set registry https://registry.npmjs.org \
   && yarn install --frozen-lockfile --production --network-timeout 600000
 
 COPY --from=build /app/dist ./dist
