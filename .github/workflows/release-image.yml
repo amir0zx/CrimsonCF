@@ -3,6 +3,9 @@ name: Publish Docker Image (GHCR)
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
