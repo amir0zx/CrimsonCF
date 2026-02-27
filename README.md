@@ -37,18 +37,6 @@ Open:
 
 Many Cloudflare IPs won’t complete HTTPS the way you expect (SNI/certs/ciphers). CrimsonCF uses **TCP handshake tests** to reliably measure reachability/latency.
 
-## Hosted UI vs running on user PC
-
-Browsers block calling `http://localhost:...` from an `https://` hosted site (mixed content). If you want **real user-PC scanning**, run locally via Docker Compose.
-
-## Cloudflare Workers build error: `Unauthorized`
-
-If Cloudflare Git builds fail at `wrangler deploy` with `Unauthorized`, your build token is missing permissions.
-
-Fix:
-
-- In Cloudflare Workers Builds settings, create/use an API token that can deploy Workers + Containers + Durable Objects.
-- Ensure the build environment has `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` (if your build system doesn’t inject them automatically).
 
 ## Persian README
 
