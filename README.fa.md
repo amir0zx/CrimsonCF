@@ -25,7 +25,8 @@ docker compose up -d
 
 سپس:
 
-- UI و Probe روی سیستم شما اجرا می‌شوند: `http://localhost:8080`
+روی سیستم شما اجرا می‌شوند
+- : `http://localhost:8080`
 
 
 ---
