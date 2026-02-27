@@ -27,14 +27,6 @@ docker compose up -d
 
 - UI و Probe روی سیستم شما اجرا می‌شوند: `http://localhost:8080`
 
-## خطای Cloudflare Deploy: `Unauthorized`
-
-اگر Cloudflare Git Build در مرحله `wrangler deploy` خطای `Unauthorized` داد، یعنی توکن Build مجوز کافی ندارد.
-
-راه‌حل:
-
-- یک API Token بسازید که اجازه Deploy برای Workers + Containers + Durable Objects داشته باشد.
-- اگر سیستم Build خودش مقداردهی نمی‌کند، `CLOUDFLARE_API_TOKEN` و `CLOUDFLARE_ACCOUNT_ID` را به Secrets اضافه کنید.
 
 ---
 
