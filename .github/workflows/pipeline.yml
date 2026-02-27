@@ -1,4 +1,4 @@
-name: CI/CD (Images + Cloudflare)
+name: CI/CD (Images + GHCR + Docker Hub)
 
 on:
   push:
