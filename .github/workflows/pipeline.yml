@@ -1,9 +1,11 @@
-name: CI/CD (Build + Release + Containers)
+name: CI/CD (Images + GHCR + Docker Hub)
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 concurrency:
@@ -11,17 +13,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   packages: write
-  id-token: write
-
-env:
-  IMAGE_NAME: crimsoncf
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +26,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: yarn
 
       - name: Enable Corepack
         run: corepack enable
@@ -46,7 +42,7 @@ jobs:
   publish_images:
     needs: build
     runs-on: ubuntu-latest
-
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4
 
@@ -64,87 +60,68 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: secrets.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker metadata
+      - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/crimsoncf
+            ${{ secrets.DOCKERHUB_USERNAME }}/crimsoncf
           tags: |
             type=semver,pattern={{version}}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
-      - name: Build & Push (multi-arch + cache + SBOM)
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
-          provenance: true
-          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
   publish_release:
     needs: publish_images
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
+    permissions:
+      contents: write
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Extract version
         id: tag
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Generate changelog
+      - name: Generate changelog (optional)
         id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            RANGE=""
-          else
-            RANGE="$PREV_TAG..HEAD"
-          fi
-
           echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          git log $RANGE --pretty=format:"- %s (%h)" >> $GITHUB_OUTPUT
+          git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.VERSION }}
-          name: CrimsonCF ${{ steps.tag.outputs.VERSION }}
+          name: Release ${{ steps.tag.outputs.VERSION }}
           body: |
             ## 🚀 CrimsonCF ${{ steps.tag.outputs.VERSION }}
 
-            ### 📦 Container Images
-            ```
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.VERSION }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.VERSION }}
-            ```
+            ### Docker Images
+            - `ghcr.io/${{ github.repository_owner }}/crimsoncf:${{ steps.tag.outputs.VERSION }}`
+            - `${{ secrets.DOCKERHUB_USERNAME }}/crimsoncf:${{ steps.tag.outputs.VERSION }}`
+            - `latest` tag also updated
 
-            ### 🏷 Tags
-            - `${{ steps.tag.outputs.VERSION }}`
-            - `latest` (only from main)
-            - `sha-<commit>`
-
-            ### 🔐 Supply Chain
-            - SBOM included
-            - Provenance (SLSA) enabled
-
-            ### 📝 Changes
+            ### Changes
             ${{ steps.changelog.outputs.CHANGELOG }}
 
         env:
