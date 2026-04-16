@@ -85,3 +85,44 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+  publish_release:
+    needs: publish_images
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog (optional)
+        id: changelog
+        run: |
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.VERSION }}
+          name: Release ${{ steps.tag.outputs.VERSION }}
+          body: |
+            ## 🚀 CrimsonCF ${{ steps.tag.outputs.VERSION }}
+
+            ### Docker Images
+            - `ghcr.io/${{ github.repository_owner }}/crimsoncf:${{ steps.tag.outputs.VERSION }}`
+            - `${{ secrets.DOCKERHUB_USERNAME }}/crimsoncf:${{ steps.tag.outputs.VERSION }}`
+            - `latest` tag also updated
+
+            ### Changes
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
