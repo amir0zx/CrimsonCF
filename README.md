@@ -45,3 +45,4 @@ Many Cloudflare IPs won’t complete HTTPS the way you expect (SNI/certs/ciphers
 ---
 
 Built by `github.com/amir0zx` with help from OpenAI ChatGPT (Codex).
+🌟 
