@@ -158,6 +158,8 @@ const STORAGE_KEYS = {
   apiBaseUrl: "cftun_api_base_url_v1",
 };
 
+const MAX_IPS_PER_RANGE = 200;
+
 const DEFAULT_RANGES = [
   "173.245.48.0/20",
   "103.21.244.0/22",
@@ -1701,11 +1703,14 @@ function App() {
               <input
                 type="number"
                 min={1}
-                max={50}
+                max={MAX_IPS_PER_RANGE}
                 value={ipsPerRange}
                 onChange={(e) =>
                   setIpsPerRange(
-                    Math.max(1, Math.min(50, Number(e.target.value) || 1)),
+                    Math.max(
+                      1,
+                      Math.min(MAX_IPS_PER_RANGE, Number(e.target.value) || 1),
+                    ),
                   )
                 }
               />
