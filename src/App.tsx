@@ -833,11 +833,18 @@ function App() {
   const portSuccessDist = useMemo(() => {
     const successCounts = new Map<number, number>();
     for (const r of filteredResults) {
-      const l4Array = r.l4 || [];
-      for (const p of l4Array) {
-        if (p.status === "success") {
-          successCounts.set(p.port, (successCounts.get(p.port) ?? 0) + 1);
+      if (r.l4 && r.l4.length > 0) {
+        for (const p of r.l4) {
+          if (p.status === "success") {
+            successCounts.set(p.port, (successCounts.get(p.port) ?? 0) + 1);
+          }
         }
+      } else {
+        // Fallback for older stored results without l4
+        if (r.tcp80 === "success") successCounts.set(80, (successCounts.get(80) ?? 0) + 1);
+        if (r.tcp443 === "success") successCounts.set(443, (successCounts.get(443) ?? 0) + 1);
+        if (r.tcp2053 === "success") successCounts.set(2053, (successCounts.get(2053) ?? 0) + 1);
+        if (r.tcp8443 === "success") successCounts.set(8443, (successCounts.get(8443) ?? 0) + 1);
       }
     }
     return uniqueScannedPorts.map((port) => ({
@@ -1282,13 +1289,22 @@ function App() {
     filenameBase: string,
   ): void {
     const uniquePorts = getUniqueScannedPorts(rows);
+    // Ensure baseline ports are always included to prevent breaking downstream consumers
+    const baselinePorts = [80, 443, 2053, 8443];
+    for (const p of baselinePorts) {
+      if (!uniquePorts.includes(p)) {
+        uniquePorts.push(p);
+      }
+    }
+    uniquePorts.sort((a, b) => a - b);
 
     const tableRows: ExportRow[] = rows.map((r) => {
+      const caps = capabilityFlags(r);
       const row: ExportRow = {
-        cdn: capabilityFlags(r).cdn ? 1 : 0,
-        tunnel: capabilityFlags(r).tunnel ? 1 : 0,
-        warp_tcp_heuristic: capabilityFlags(r).warp ? 1 : 0,
-        bpb: capabilityFlags(r).bpb ? 1 : 0,
+        cdn: caps.cdn ? 1 : 0,
+        tunnel: caps.tunnel ? 1 : 0,
+        warp_tcp_heuristic: caps.warp ? 1 : 0,
+        bpb: caps.bpb ? 1 : 0,
         ip: r.ipAddress,
         range: r.ipRange,
         overall: r.overall,
