@@ -521,6 +521,26 @@ function buildVlessUri(input: {
   return `${base.toString()}${fragment}`;
 }
 
+function getUniqueScannedPorts(
+  results: ScanResult[],
+  options?: { includeToggles?: number[] },
+): number[] {
+  const portsSet = new Set<number>();
+  if (options?.includeToggles) {
+    for (const p of options.includeToggles) {
+      portsSet.add(p);
+    }
+  }
+  for (const r of results) {
+    if (r.l4) {
+      for (const p of r.l4) {
+        portsSet.add(p.port);
+      }
+    }
+  }
+  return [...portsSet].sort((a, b) => a - b);
+}
+
 function App() {
   const [ranges, setRanges] = useState<string[]>(() =>
     readStorage(STORAGE_KEYS.ranges, DEFAULT_RANGES),
@@ -807,25 +827,22 @@ function App() {
   }, [filteredResults]);
 
   const uniqueScannedPorts = useMemo(() => {
-    const portsSet = new Set<number>();
-    for (const p of portToggles) {
-      portsSet.add(p);
-    }
-    for (const r of filteredResults) {
-      if (r.l4) {
-        for (const p of r.l4) {
-          portsSet.add(p.port);
-        }
-      }
-    }
-    return [...portsSet].sort((a, b) => a - b);
+    return getUniqueScannedPorts(filteredResults, { includeToggles: portToggles });
   }, [filteredResults, portToggles]);
 
   const portSuccessDist = useMemo(() => {
+    const successCounts = new Map<number, number>();
+    for (const r of filteredResults) {
+      const l4Array = r.l4 || [];
+      for (const p of l4Array) {
+        if (p.status === "success") {
+          successCounts.set(p.port, (successCounts.get(p.port) ?? 0) + 1);
+        }
+      }
+    }
     return uniqueScannedPorts.map((port) => ({
       port,
-      success: filteredResults.filter((r) => l4Status(r, port) === "success")
-        .length,
+      success: successCounts.get(port) ?? 0,
       total: filteredResults.length,
     }));
   }, [filteredResults, uniqueScannedPorts]);
@@ -1264,15 +1281,7 @@ function App() {
     rows: ScanResult[],
     filenameBase: string,
   ): void {
-    const portsSet = new Set<number>();
-    for (const r of rows) {
-      if (r.l4) {
-        for (const p of r.l4) {
-          portsSet.add(p.port);
-        }
-      }
-    }
-    const uniquePorts = [...portsSet].sort((a, b) => a - b);
+    const uniquePorts = getUniqueScannedPorts(rows);
 
     const tableRows: ExportRow[] = rows.map((r) => {
       const row: ExportRow = {
