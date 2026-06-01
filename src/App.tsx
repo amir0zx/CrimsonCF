@@ -178,6 +178,8 @@ const DEFAULT_RANGES = [
   "131.0.72.0/22",
 ];
 
+const LEGACY_TCP_PORTS = [80, 443, 2053, 8443];
+
 function readStorage<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -527,8 +529,7 @@ function getUniqueScannedPorts(
 ): number[] {
   const portsSet = new Set<number>();
   // Baseline ports always included to prevent UI/export breaking changes
-  const baselinePorts = [80, 443, 2053, 8443];
-  for (const p of baselinePorts) {
+  for (const p of LEGACY_TCP_PORTS) {
     portsSet.add(p);
   }
   if (options?.extraPorts) {
@@ -838,18 +839,22 @@ function App() {
   const portSuccessDist = useMemo(() => {
     const successCounts = new Map<number, number>();
     for (const r of filteredResults) {
+      const seenSuccesses = new Set<number>();
       if (r.l4 && r.l4.length > 0) {
         for (const p of r.l4) {
-          if (p.status === "success") {
+          if (p.status === "success" && !seenSuccesses.has(p.port)) {
+            seenSuccesses.add(p.port);
             successCounts.set(p.port, (successCounts.get(p.port) ?? 0) + 1);
           }
         }
       } else {
         // Fallback for older stored results without l4
-        if (r.tcp80 === "success") successCounts.set(80, (successCounts.get(80) ?? 0) + 1);
-        if (r.tcp443 === "success") successCounts.set(443, (successCounts.get(443) ?? 0) + 1);
-        if (r.tcp2053 === "success") successCounts.set(2053, (successCounts.get(2053) ?? 0) + 1);
-        if (r.tcp8443 === "success") successCounts.set(8443, (successCounts.get(8443) ?? 0) + 1);
+        for (const port of LEGACY_TCP_PORTS) {
+          if (l4Status(r, port) === "success" && !seenSuccesses.has(port)) {
+            seenSuccesses.add(port);
+            successCounts.set(port, (successCounts.get(port) ?? 0) + 1);
+          }
+        }
       }
     }
     return uniqueScannedPorts.map((port) => ({
