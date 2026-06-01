@@ -523,11 +523,16 @@ function buildVlessUri(input: {
 
 function getUniqueScannedPorts(
   results: ScanResult[],
-  options?: { includeToggles?: number[] },
+  options?: { extraPorts?: number[] },
 ): number[] {
   const portsSet = new Set<number>();
-  if (options?.includeToggles) {
-    for (const p of options.includeToggles) {
+  // Baseline ports always included to prevent UI/export breaking changes
+  const baselinePorts = [80, 443, 2053, 8443];
+  for (const p of baselinePorts) {
+    portsSet.add(p);
+  }
+  if (options?.extraPorts) {
+    for (const p of options.extraPorts) {
       portsSet.add(p);
     }
   }
@@ -827,7 +832,7 @@ function App() {
   }, [filteredResults]);
 
   const uniqueScannedPorts = useMemo(() => {
-    return getUniqueScannedPorts(filteredResults, { includeToggles: portToggles });
+    return getUniqueScannedPorts(filteredResults, { extraPorts: portToggles });
   }, [filteredResults, portToggles]);
 
   const portSuccessDist = useMemo(() => {
@@ -1289,14 +1294,6 @@ function App() {
     filenameBase: string,
   ): void {
     const uniquePorts = getUniqueScannedPorts(rows);
-    // Ensure baseline ports are always included to prevent breaking downstream consumers
-    const baselinePorts = [80, 443, 2053, 8443];
-    for (const p of baselinePorts) {
-      if (!uniquePorts.includes(p)) {
-        uniquePorts.push(p);
-      }
-    }
-    uniquePorts.sort((a, b) => a - b);
 
     const tableRows: ExportRow[] = rows.map((r) => {
       const caps = capabilityFlags(r);
