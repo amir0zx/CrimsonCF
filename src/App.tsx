@@ -178,6 +178,8 @@ const DEFAULT_RANGES = [
   "131.0.72.0/22",
 ];
 
+const LEGACY_TCP_PORTS = [80, 443, 2053, 8443];
+
 function readStorage<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
@@ -521,6 +523,30 @@ function buildVlessUri(input: {
   return `${base.toString()}${fragment}`;
 }
 
+function getUniqueScannedPorts(
+  results: ScanResult[],
+  options?: { extraPorts?: number[] },
+): number[] {
+  const portsSet = new Set<number>();
+  // Baseline ports always included to prevent UI/export breaking changes
+  for (const p of LEGACY_TCP_PORTS) {
+    portsSet.add(p);
+  }
+  if (options?.extraPorts) {
+    for (const p of options.extraPorts) {
+      portsSet.add(p);
+    }
+  }
+  for (const r of results) {
+    if (r.l4) {
+      for (const p of r.l4) {
+        portsSet.add(p.port);
+      }
+    }
+  }
+  return [...portsSet].sort((a, b) => a - b);
+}
+
 function App() {
   const [ranges, setRanges] = useState<string[]>(() =>
     readStorage(STORAGE_KEYS.ranges, DEFAULT_RANGES),
@@ -806,15 +832,37 @@ function App() {
     }));
   }, [filteredResults]);
 
+  const uniqueScannedPorts = useMemo(() => {
+    return getUniqueScannedPorts(filteredResults, { extraPorts: portToggles });
+  }, [filteredResults, portToggles]);
+
   const portSuccessDist = useMemo(() => {
-    const ports = [80, 443, 2053, 8443, 7844, 8080, 2408];
-    return ports.map((port) => ({
+    const successCounts = new Map<number, number>();
+    for (const r of filteredResults) {
+      const seenSuccesses = new Set<number>();
+      if (r.l4 && r.l4.length > 0) {
+        for (const p of r.l4) {
+          if (p.status === "success" && !seenSuccesses.has(p.port)) {
+            seenSuccesses.add(p.port);
+            successCounts.set(p.port, (successCounts.get(p.port) ?? 0) + 1);
+          }
+        }
+      } else {
+        // Fallback for older stored results without l4
+        for (const port of LEGACY_TCP_PORTS) {
+          if (l4Status(r, port) === "success" && !seenSuccesses.has(port)) {
+            seenSuccesses.add(port);
+            successCounts.set(port, (successCounts.get(port) ?? 0) + 1);
+          }
+        }
+      }
+    }
+    return uniqueScannedPorts.map((port) => ({
       port,
-      success: filteredResults.filter((r) => l4Status(r, port) === "success")
-        .length,
+      success: successCounts.get(port) ?? 0,
       total: filteredResults.length,
     }));
-  }, [filteredResults]);
+  }, [filteredResults, uniqueScannedPorts]);
 
   const latencyBuckets = useMemo(() => {
     // Buckets in ms for usefulness
@@ -1250,22 +1298,31 @@ function App() {
     rows: ScanResult[],
     filenameBase: string,
   ): void {
-    const tableRows: ExportRow[] = rows.map((r) => ({
-      cdn: capabilityFlags(r).cdn ? 1 : 0,
-      tunnel: capabilityFlags(r).tunnel ? 1 : 0,
-      warp_tcp_heuristic: capabilityFlags(r).warp ? 1 : 0,
-      bpb: capabilityFlags(r).bpb ? 1 : 0,
-      ip: r.ipAddress,
-      range: r.ipRange,
-      overall: r.overall,
-      tcp_80: r.tcp80,
-      tcp_443: r.tcp443,
-      tcp_2053: r.tcp2053,
-      tcp_8443: r.tcp8443,
-      open_ports: r.openPorts,
-      latency_ms: r.latency,
-      time: r.createdAt,
-    }));
+    const uniquePorts = getUniqueScannedPorts(rows);
+
+    const tableRows: ExportRow[] = rows.map((r) => {
+      const caps = capabilityFlags(r);
+      const row: ExportRow = {
+        cdn: caps.cdn ? 1 : 0,
+        tunnel: caps.tunnel ? 1 : 0,
+        warp_tcp_heuristic: caps.warp ? 1 : 0,
+        bpb: caps.bpb ? 1 : 0,
+        ip: r.ipAddress,
+        range: r.ipRange,
+        overall: r.overall,
+      };
+
+      for (const port of uniquePorts) {
+        row[`tcp_${port}`] = l4Status(r, port);
+      }
+
+      row.open_ports = r.openPorts;
+      row.latency_ms = r.latency;
+      row.time = r.createdAt;
+
+      return row;
+    });
+
     exportRows(format, tableRows, filenameBase);
   }
 
@@ -2401,10 +2458,9 @@ function App() {
                       <th>IP</th>
                       <th>Range</th>
                       <th>Overall</th>
-                      <th>TCP:80</th>
-                      <th>TCP:443</th>
-                      <th>TCP:2053</th>
-                      <th>TCP:8443</th>
+                      {uniqueScannedPorts.map((port) => (
+                        <th key={port}>TCP:{port}</th>
+                      ))}
                       <th>Open Ports</th>
                       <th>Latency</th>
                       <th>Time</th>
@@ -2430,10 +2486,14 @@ function App() {
                           <td>{r.ipAddress}</td>
                           <td>{r.ipRange}</td>
                           <td className={`st ${r.overall}`}>{r.overall}</td>
-                          <td className={`st ${r.tcp80}`}>{r.tcp80}</td>
-                          <td className={`st ${r.tcp443}`}>{r.tcp443}</td>
-                          <td className={`st ${r.tcp2053}`}>{r.tcp2053}</td>
-                          <td className={`st ${r.tcp8443}`}>{r.tcp8443}</td>
+                          {uniqueScannedPorts.map((port) => {
+                            const status = l4Status(r, port);
+                            return (
+                              <td key={port} className={`st ${status}`}>
+                                {status}
+                              </td>
+                            );
+                          })}
                           <td>{r.openPorts}</td>
                           <td>{r.latency ?? "-"}</td>
                           <td>{new Date(r.createdAt).toLocaleTimeString()}</td>
