@@ -654,7 +654,14 @@ function App() {
   useEffect(() => writeStorage(STORAGE_KEYS.vless, vlessSettings), [vlessSettings]);
   useEffect(() => writeStorage(STORAGE_KEYS.apiBaseUrl, apiBaseUrl), [apiBaseUrl]);
 
-  const mergedResults = liveResults.length ? liveResults : allResults;
+  const mergedResults = useMemo(() => {
+    if (!liveResults.length) return allResults;
+    // Union: live (current) batch on top, plus all persisted batches not
+    // already in live. Without this, a running scan shadows allResults and
+    // exporting an older history entry yields an empty file.
+    const liveIds = new Set(liveResults.map((r) => r.id));
+    return [...liveResults, ...allResults.filter((r) => !liveIds.has(r.id))];
+  }, [liveResults, allResults]);
 
   const rangesBySourceGroup = useMemo(() => {
     const m = new Map<SourceGroupId, Set<string>>();
