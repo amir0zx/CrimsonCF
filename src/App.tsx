@@ -806,15 +806,29 @@ function App() {
     }));
   }, [filteredResults]);
 
+  const uniqueScannedPorts = useMemo(() => {
+    const portsSet = new Set<number>();
+    for (const p of portToggles) {
+      portsSet.add(p);
+    }
+    for (const r of filteredResults) {
+      if (r.l4) {
+        for (const p of r.l4) {
+          portsSet.add(p.port);
+        }
+      }
+    }
+    return [...portsSet].sort((a, b) => a - b);
+  }, [filteredResults, portToggles]);
+
   const portSuccessDist = useMemo(() => {
-    const ports = [80, 443, 2053, 8443, 7844, 8080, 2408];
-    return ports.map((port) => ({
+    return uniqueScannedPorts.map((port) => ({
       port,
       success: filteredResults.filter((r) => l4Status(r, port) === "success")
         .length,
       total: filteredResults.length,
     }));
-  }, [filteredResults]);
+  }, [filteredResults, uniqueScannedPorts]);
 
   const latencyBuckets = useMemo(() => {
     // Buckets in ms for usefulness
@@ -1250,22 +1264,38 @@ function App() {
     rows: ScanResult[],
     filenameBase: string,
   ): void {
-    const tableRows: ExportRow[] = rows.map((r) => ({
-      cdn: capabilityFlags(r).cdn ? 1 : 0,
-      tunnel: capabilityFlags(r).tunnel ? 1 : 0,
-      warp_tcp_heuristic: capabilityFlags(r).warp ? 1 : 0,
-      bpb: capabilityFlags(r).bpb ? 1 : 0,
-      ip: r.ipAddress,
-      range: r.ipRange,
-      overall: r.overall,
-      tcp_80: r.tcp80,
-      tcp_443: r.tcp443,
-      tcp_2053: r.tcp2053,
-      tcp_8443: r.tcp8443,
-      open_ports: r.openPorts,
-      latency_ms: r.latency,
-      time: r.createdAt,
-    }));
+    const portsSet = new Set<number>();
+    for (const r of rows) {
+      if (r.l4) {
+        for (const p of r.l4) {
+          portsSet.add(p.port);
+        }
+      }
+    }
+    const uniquePorts = [...portsSet].sort((a, b) => a - b);
+
+    const tableRows: ExportRow[] = rows.map((r) => {
+      const row: ExportRow = {
+        cdn: capabilityFlags(r).cdn ? 1 : 0,
+        tunnel: capabilityFlags(r).tunnel ? 1 : 0,
+        warp_tcp_heuristic: capabilityFlags(r).warp ? 1 : 0,
+        bpb: capabilityFlags(r).bpb ? 1 : 0,
+        ip: r.ipAddress,
+        range: r.ipRange,
+        overall: r.overall,
+      };
+
+      for (const port of uniquePorts) {
+        row[`tcp_${port}`] = l4Status(r, port);
+      }
+
+      row.open_ports = r.openPorts;
+      row.latency_ms = r.latency;
+      row.time = r.createdAt;
+
+      return row;
+    });
+
     exportRows(format, tableRows, filenameBase);
   }
 
@@ -2401,10 +2431,9 @@ function App() {
                       <th>IP</th>
                       <th>Range</th>
                       <th>Overall</th>
-                      <th>TCP:80</th>
-                      <th>TCP:443</th>
-                      <th>TCP:2053</th>
-                      <th>TCP:8443</th>
+                      {uniqueScannedPorts.map((port) => (
+                        <th key={port}>TCP:{port}</th>
+                      ))}
                       <th>Open Ports</th>
                       <th>Latency</th>
                       <th>Time</th>
@@ -2430,10 +2459,14 @@ function App() {
                           <td>{r.ipAddress}</td>
                           <td>{r.ipRange}</td>
                           <td className={`st ${r.overall}`}>{r.overall}</td>
-                          <td className={`st ${r.tcp80}`}>{r.tcp80}</td>
-                          <td className={`st ${r.tcp443}`}>{r.tcp443}</td>
-                          <td className={`st ${r.tcp2053}`}>{r.tcp2053}</td>
-                          <td className={`st ${r.tcp8443}`}>{r.tcp8443}</td>
+                          {uniqueScannedPorts.map((port) => {
+                            const status = l4Status(r, port);
+                            return (
+                              <td key={port} className={`st ${status}`}>
+                                {status}
+                              </td>
+                            );
+                          })}
                           <td>{r.openPorts}</td>
                           <td>{r.latency ?? "-"}</td>
                           <td>{new Date(r.createdAt).toLocaleTimeString()}</td>
